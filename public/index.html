@@ -1,0 +1,159 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Meta Metrics Dashboard</title>
+
+  <style>
+    body { font-family: system-ui, -apple-system, Arial; padding: 24px; background:#f5f5f5; }
+    h1 { margin: 0 0 4px; }
+    .muted { color: #666; font-size: 14px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 20px; margin-top: 18px; }
+    .card { background: #fff; border-radius: 16px; padding: 20px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); }
+    .big { font-size: 34px; font-weight: 800; margin: 8px 0; }
+    button { padding: 10px 16px; border-radius: 10px; border: 1px solid #ddd; background: white; cursor: pointer; font-weight: 600; }
+    input { padding: 10px; border-radius: 10px; border: 1px solid #ddd; width: 100%; margin-bottom: 10px; }
+    details summary { cursor: pointer; font-size: 13px; margin-top: 10px; color:#666; }
+    pre { font-size: 12px; background: #f0f0f0; padding: 10px; border-radius: 8px; overflow-x: auto; }
+    .kpi { display:flex; justify-content:space-between; gap:12px; padding:8px 0; border-bottom:1px solid #eee; }
+    .kpi:last-child { border-bottom: none; }
+    .k { color:#333; font-size: 14px; }
+    .v { font-weight:700; }
+    .err { margin-top: 10px; padding: 10px 12px; border-radius: 10px; background: #fff3f3; border: 1px solid #ffcaca; color: #8b0000; font-size: 13px; }
+  </style>
+</head>
+
+<body>
+  <h1>Meta Metrics Dashboard</h1>
+  <div class="muted">Instagram + Facebook via Meta Graph API. Metrics are “latest daily” values when available.</div>
+
+  <div style="margin-top:14px;">
+    <button id="refreshBtn">Refresh now</button>
+    <span class="muted" style="margin-left:10px;">Auto-refresh: 1 hour (server caches Meta calls)</span>
+  </div>
+
+  <div class="muted" style="margin-top:6px;">
+    Last updated: <span id="lastUpdated">-</span>
+    <span id="cacheTag"></span>
+  </div>
+  <div id="errorBox" class="err" style="display:none;"></div>
+
+  <div class="grid">
+    <div class="card">
+      <h2>Instagram</h2>
+      <div class="big" id="igFollowers">-</div>
+      <div class="muted" id="igName"></div>
+
+      <div id="igKPIs"></div>
+
+      <details>
+        <summary>Debug</summary>
+        <pre id="igRaw"></pre>
+      </details>
+    </div>
+
+    <div class="card">
+      <h2>Facebook</h2>
+      <div class="big" id="fbFollowers">-</div>
+      <div class="muted" id="fbName"></div>
+
+      <div id="fbKPIs"></div>
+
+      <details>
+        <summary>Debug</summary>
+        <pre id="fbRaw"></pre>
+      </details>
+    </div>
+
+    <div class="card">
+      <h2>Meta Video Insights</h2>
+      <input id="videoId" placeholder="Paste Facebook video_id (optional)" />
+      <button id="videoBtn">Get insights</button>
+
+      <details>
+        <summary>Debug</summary>
+        <pre id="videoRaw"></pre>
+      </details>
+    </div>
+  </div>
+
+<script>
+  const fmt = (n) => (typeof n === "number" ? n.toLocaleString() : "N/A");
+  const fmtPct = (n) => (typeof n === "number" ? `${n.toFixed(2)}%` : "N/A");
+
+  function kpiRow(label, value) {
+    return `<div class="kpi"><div class="k">${label}</div><div class="v">${value}</div></div>`;
+  }
+
+  async function load() {
+    const data = await fetch("/api/meta/summary").then(r => r.json());
+
+    if (data.error) {
+      document.getElementById("cacheTag").textContent = "";
+      document.getElementById("lastUpdated").textContent = "Error";
+      const errorBox = document.getElementById("errorBox");
+      errorBox.style.display = "block";
+      errorBox.textContent = data.action ? `${data.error} ${data.action}` : data.error;
+      document.getElementById("igRaw").textContent = JSON.stringify(data, null, 2);
+      document.getElementById("fbRaw").textContent = JSON.stringify(data, null, 2);
+      return;
+    }
+    document.getElementById("errorBox").style.display = "none";
+
+    document.getElementById("lastUpdated").textContent = new Date().toLocaleTimeString();
+    document.getElementById("cacheTag").textContent = data.cached ? " (cached)" : "";
+
+    // Instagram
+    const ig = data.instagram || {};
+    document.getElementById("igFollowers").textContent = fmt(ig.followers_now);
+    document.getElementById("igName").textContent = ig.username ? `@${ig.username}` : "";
+
+    document.getElementById("igKPIs").innerHTML = [
+      kpiRow("Instagram – Total Reach", fmt(ig.total_reach)),
+      kpiRow("Instagram – Total Views / Impressions", fmt(ig.total_impressions)),
+      kpiRow("Instagram – Content Interactions", fmt(ig.content_interactions)),
+      kpiRow("Instagram – Engagement Rate", fmtPct(ig.engagement_rate_pct)),
+      kpiRow("Instagram – Link Clicks", fmt(ig.link_clicks)),
+      kpiRow("Instagram – Click-Through Rate (CTR)", fmtPct(ig.ctr_pct)),
+      kpiRow("Instagram – New Followers", fmt(ig.new_followers)),
+      kpiRow("Instagram – Unfollows", fmt(ig.unfollows)),
+      kpiRow("Instagram – Net Follower Growth", fmt(ig.net_follower_growth)),
+    ].join("");
+
+    document.getElementById("igRaw").textContent = JSON.stringify(ig, null, 2);
+
+    // Facebook
+    const fb = data.facebook || {};
+    document.getElementById("fbFollowers").textContent = fmt(fb.followers_now);
+    document.getElementById("fbName").textContent = fb.page_name || "";
+
+    document.getElementById("fbKPIs").innerHTML = [
+      kpiRow("Facebook – Total Reach", fmt(fb.total_reach)),
+      kpiRow("Facebook – Total Views / Impressions", fmt(fb.total_impressions)),
+      kpiRow("Facebook – Content Interactions", fmt(fb.content_interactions)),
+      kpiRow("Facebook – Engagement Rate", fmtPct(fb.engagement_rate_pct)),
+      kpiRow("Facebook – Link Clicks", fmt(fb.link_clicks)),
+      kpiRow("Facebook – Click-Through Rate (CTR)", fmtPct(fb.ctr_pct)),
+      kpiRow("Facebook – New Followers", fmt(fb.new_followers)),
+    ].join("");
+
+    document.getElementById("fbRaw").textContent = JSON.stringify(fb, null, 2);
+  }
+
+  document.getElementById("refreshBtn").onclick = load;
+
+  document.getElementById("videoBtn").onclick = async () => {
+    const id = document.getElementById("videoId").value.trim();
+    if (!id) return;
+    const data = await fetch(`/api/meta/video-insights?video_id=${encodeURIComponent(id)}`).then(r => r.json());
+    document.getElementById("videoRaw").textContent = JSON.stringify(data, null, 2);
+  };
+
+  load();
+  // 1 hour = 60 minutes × 60 seconds × 1000 ms
+setInterval(load, 3600000);
+</script>
+
+</body>
+</html>
