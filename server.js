@@ -96,6 +96,14 @@ async function fetchInsightsBestEffort(baseUrl, metrics) {
   return { data: results.filter(Boolean) };
 }
 
+function firstAvailableMetric(insightsData, metricNames) {
+  for (const name of metricNames) {
+    const v = sumMetricValues(insightsData, name);
+    if (Number.isFinite(v)) return v;
+  }
+  return null;
+}
+
 async function fetchInsightsTotalValueBestEffort(baseUrl, metrics) {
   const results = await Promise.all(
     metrics.map(async (metric) => {
@@ -120,6 +128,17 @@ async function fetchInsightsTotalValueBestEffort(baseUrl, metrics) {
     if (r) out[r.name] = r.value;
   }
   return out;
+}
+
+async function getPageAccessTokenFromUserToken(userToken, pageId) {
+  if (!userToken || !pageId) return null;
+  const url =
+    `https://graph.facebook.com/v21.0/me/accounts` +
+    `?fields=id,access_token&limit=200` +
+    `&access_token=${encodeURIComponent(userToken)}`;
+  const data = await getJSON(url);
+  const page = Array.isArray(data?.data) ? data.data.find((p) => String(p?.id) === String(pageId)) : null;
+  return page?.access_token || null;
 }
 
 function unixSeconds(d) {
@@ -155,6 +174,15 @@ function sumMetricValues(insightsData, metricName) {
 
 function followerDeltaForPeriod(insightsData) {
   const item = (insightsData || []).find((m) => m.name === "follower_count");
+  if (!item || !Array.isArray(item.values) || item.values.length < 2) return null;
+  const first = item.values[0]?.value;
+  const last = item.values[item.values.length - 1]?.value;
+  if (!Number.isFinite(first) || !Number.isFinite(last)) return null;
+  return last - first;
+}
+
+function metricDeltaForPeriod(insightsData, metricName) {
+  const item = (insightsData || []).find((m) => m.name === metricName);
   if (!item || !Array.isArray(item.values) || item.values.length < 2) return null;
   const first = item.values[0]?.value;
   const last = item.values[item.values.length - 1]?.value;
@@ -313,6 +341,7 @@ app.get("/api/meta/summary", async (req, res) => {
 
     const igToken = process.env.USER_ACCESS_TOKEN || process.env.META_ACCESS_TOKEN;
     const fbToken = process.env.FB_ACCESS_TOKEN || process.env.META_ACCESS_TOKEN || process.env.USER_ACCESS_TOKEN;
+    const userTokenForPageLookup = process.env.USER_ACCESS_TOKEN || process.env.META_ACCESS_TOKEN;
     const igUserId = process.env.IG_USER_ID;
     const pageId = process.env.FB_PAGE_ID;
 
@@ -401,26 +430,27 @@ app.get("/api/meta/summary", async (req, res) => {
     } else if (!fbToken) {
       warnings.push("No Facebook token found. Set FB_ACCESS_TOKEN or META_ACCESS_TOKEN for Facebook metrics.");
     } else {
-      const fbBasicUrl =
-        `https://graph.facebook.com/v21.0/${pageId}` +
-        `?fields=name,fan_count` +
-        `&access_token=${encodeURIComponent(fbToken)}`;
+      const fetchFacebookWithToken = async (token) => {
+        const fbBasicUrl =
+          `https://graph.facebook.com/v21.0/${pageId}` +
+          `?fields=name,fan_count` +
+          `&access_token=${encodeURIComponent(token)}`;
 
-      const fbInsightsMetrics = [
-        "page_impressions_unique",
-        "page_impressions",
-        "page_engaged_users",
-        "page_consumptions",
-      ];
+        const fbInsightsMetrics = [
+          "page_impressions_unique",
+          "page_views_total",
+          "page_post_engagements",
+          "page_total_actions",
+          "page_follows",
+        ];
 
-      const fbInsightsBaseUrl =
-        `https://graph.facebook.com/v21.0/${pageId}/insights` +
-        `?period=day&since=${since}&until=${until}` +
-        `&access_token=${encodeURIComponent(fbToken)}`;
+        const fbInsightsBaseUrl =
+          `https://graph.facebook.com/v21.0/${pageId}/insights` +
+          `?period=day&since=${since}&until=${until}` +
+          `&access_token=${encodeURIComponent(token)}`;
 
-      try {
         const fbBasic = await getJSON(fbBasicUrl);
-        facebook = {
+        const out = {
           page_name: fbBasic.name ?? null,
           followers_now: fbBasic.fan_count ?? null,
           total_reach: null,
@@ -433,26 +463,72 @@ app.get("/api/meta/summary", async (req, res) => {
         };
 
         const fbInsights = await fetchInsightsBestEffort(fbInsightsBaseUrl, fbInsightsMetrics);
-
-        const fbReach = sumMetricValues(fbInsights.data, "page_impressions_unique");
-        const fbImpressions = sumMetricValues(fbInsights.data, "page_impressions");
-        const fbInteractions = sumMetricValues(fbInsights.data, "page_engaged_users");
-        const fbLinkClicks = sumMetricValues(fbInsights.data, "page_consumptions");
-        const fbEngagementRate = pct(safeDiv(fbInteractions, fbImpressions));
+        const fbReach = firstAvailableMetric(fbInsights.data, ["page_impressions_unique"]);
+        const fbImpressions = firstAvailableMetric(fbInsights.data, ["page_views_total"]);
+        const fbInteractions = firstAvailableMetric(fbInsights.data, ["page_post_engagements"]);
+        const fbLinkClicks = firstAvailableMetric(fbInsights.data, ["page_total_actions"]);
+        const fbNewFollowers = metricDeltaForPeriod(fbInsights.data, "page_follows");
+        const fbEngagementRate = pct(safeDiv(fbInteractions, fbReach));
         const fbCTR = pct(safeDiv(fbLinkClicks, fbImpressions));
 
-        facebook.total_reach = fbReach;
-        facebook.total_impressions = fbImpressions;
-        facebook.content_interactions = fbInteractions;
-        facebook.engagement_rate_pct = fbEngagementRate;
-        facebook.link_clicks = fbLinkClicks;
-        facebook.ctr_pct = fbCTR;
+        out.total_reach = fbReach;
+        out.total_impressions = fbImpressions;
+        out.content_interactions = fbInteractions;
+        out.engagement_rate_pct = fbEngagementRate;
+        out.link_clicks = fbLinkClicks;
+        out.ctr_pct = fbCTR;
+        out.new_followers = fbNewFollowers;
+        if (
+          !Number.isFinite(fbReach) &&
+          !Number.isFinite(fbImpressions) &&
+          !Number.isFinite(fbInteractions) &&
+          !Number.isFinite(fbLinkClicks)
+        ) {
+          warnings.push("Facebook insights returned empty data for this period/token.");
+        }
+        return out;
+      };
+
+      try {
+        facebook = await fetchFacebookWithToken(fbToken);
       } catch (e) {
-        if (isPermissionError(e) || isPageTokenRequiredError(e)) {
-          if (facebook) {
-            warnings.push("Facebook insights unavailable with current token/permissions. Showing basic page metrics only.");
-          } else {
-            warnings.push("Facebook metrics unavailable with current token/permissions.");
+        if (isPageTokenRequiredError(e)) {
+          try {
+            const derivedPageToken = await getPageAccessTokenFromUserToken(userTokenForPageLookup, pageId);
+            if (derivedPageToken) {
+              facebook = await fetchFacebookWithToken(derivedPageToken);
+              warnings.push("Facebook insights used a derived Page Access Token from your user token.");
+            } else {
+              warnings.push("Could not derive Page Access Token from user token. Set FB_ACCESS_TOKEN (page token).");
+            }
+          } catch (retryErr) {
+            if (isPermissionError(retryErr) || isPageTokenRequiredError(retryErr)) {
+              warnings.push("Facebook insights unavailable with current token/permissions. Showing basic page metrics only.");
+            } else {
+              throw retryErr;
+            }
+          }
+        } else if (isPermissionError(e)) {
+          warnings.push("Facebook insights unavailable with current token/permissions. Showing basic page metrics only.");
+          try {
+            const fbBasicUrl =
+              `https://graph.facebook.com/v21.0/${pageId}` +
+              `?fields=name,fan_count` +
+              `&access_token=${encodeURIComponent(fbToken)}`;
+            const fbBasic = await getJSON(fbBasicUrl);
+            facebook = {
+              page_name: fbBasic.name ?? null,
+              followers_now: fbBasic.fan_count ?? null,
+              total_reach: null,
+              total_impressions: null,
+              content_interactions: null,
+              engagement_rate_pct: null,
+              link_clicks: null,
+              ctr_pct: null,
+              new_followers: null,
+            };
+          } catch {
+            // keep null if even basic fetch fails
           }
         } else {
           throw e;
