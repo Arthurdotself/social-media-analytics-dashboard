@@ -311,12 +311,19 @@ app.get("/api/meta/summary", async (req, res) => {
       return res.json({ ...cache.data, cached: true });
     }
 
+<<<<<<< Updated upstream
     const igToken = process.env.USER_ACCESS_TOKEN || process.env.META_ACCESS_TOKEN;
     const fbToken = process.env.FB_ACCESS_TOKEN || process.env.META_ACCESS_TOKEN || process.env.USER_ACCESS_TOKEN;
+=======
+    const token = process.env.USER_ACCESS_TOKEN || process.env.META_ACCESS_TOKEN;
+>>>>>>> Stashed changes
     const igUserId = process.env.IG_USER_ID;
-    const pageId = process.env.FB_PAGE_ID;
 
+<<<<<<< Updated upstream
     if (!igToken || !igUserId) {
+=======
+    if (!token || !igUserId) {
+>>>>>>> Stashed changes
       return res.status(400).json({
         error: "Missing USER_ACCESS_TOKEN (or META_ACCESS_TOKEN) or IG_USER_ID in .env",
       });
@@ -355,6 +362,7 @@ app.get("/api/meta/summary", async (req, res) => {
       `?period=day&metric_type=total_value&since=${since}&until=${until}` +
       `&access_token=${encodeURIComponent(igToken)}`;
 
+<<<<<<< Updated upstream
     const warnings = [];
 
     let igBasic = {};
@@ -380,6 +388,12 @@ app.get("/api/meta/summary", async (req, res) => {
       if (!isPermissionError(e)) throw e;
       warnings.push("Missing permission for Instagram total-value insights.");
     }
+=======
+    const [igBasic, igInsights] = await Promise.all([
+      getJSON(igBasicUrl),
+      fetchInsightsBestEffort(igInsightsBaseUrl, igInsightsMetrics),
+    ]);
+>>>>>>> Stashed changes
 
     // ---- Instagram metrics (weekly sums / deltas for the selected Sunday..Saturday period)
     const igReach = sumMetricValues(igInsights.data, "reach");
@@ -395,6 +409,7 @@ app.get("/api/meta/summary", async (req, res) => {
     const igEngagementRate = pct(safeDiv(igInteractions, igReach)); // interactions / reach
     const igCTR = pct(safeDiv(igLinkClicks, igImpressions)); // clicks / impressions
 
+<<<<<<< Updated upstream
     let facebook = null;
     if (!pageId) {
       warnings.push("FB_PAGE_ID is not set. Skipping Facebook metrics.");
@@ -460,6 +475,8 @@ app.get("/api/meta/summary", async (req, res) => {
       }
     }
 
+=======
+>>>>>>> Stashed changes
     const payload = {
       cached: false,
       updated_at: new Date().toISOString(),
@@ -487,8 +504,11 @@ app.get("/api/meta/summary", async (req, res) => {
         unfollows: igUnfollows,
         net_follower_growth: igNetGrowth,
       },
+<<<<<<< Updated upstream
       facebook,
       warnings,
+=======
+>>>>>>> Stashed changes
     };
 
     cache = { key: cacheKey, ts: now, data: payload };
@@ -505,6 +525,7 @@ app.get("/api/meta/instagram", async (req, res) => {
   res.status(410).json({ error: "Use /api/meta/summary instead." });
 });
 app.get("/api/meta/facebook-page", async (req, res) => {
+<<<<<<< Updated upstream
   try {
     const pageId = process.env.FB_PAGE_ID;
     const token = process.env.FB_ACCESS_TOKEN || process.env.META_ACCESS_TOKEN || process.env.USER_ACCESS_TOKEN;
@@ -526,6 +547,13 @@ app.get("/api/meta/facebook-page", async (req, res) => {
     if (mapped) return res.status(mapped.httpStatus).json(mapped.payload);
     res.status(500).json({ error: e.message });
   }
+=======
+  res.status(410).json({ error: "Facebook page endpoint removed. This project now supports Instagram only." });
+});
+
+app.get("/api/meta/video-insights", async (req, res) => {
+  res.status(410).json({ error: "Video insights endpoint removed. It requires page-level access." });
+>>>>>>> Stashed changes
 });
 
 app.get("/api/meta/video-insights", async (req, res) => {
