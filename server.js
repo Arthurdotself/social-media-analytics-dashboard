@@ -392,7 +392,7 @@ app.get("/api/meta/summary", async (req, res) => {
     const igUnfollows = igDelta != null ? Math.max(0, -igDelta) : null;
     const igNetGrowth = igDelta;
 
-    const igEngagementRate = pct(safeDiv(igInteractions, igImpressions)); // interactions / impressions
+    const igEngagementRate = pct(safeDiv(igInteractions, igReach)); // interactions / reach
     const igCTR = pct(safeDiv(igLinkClicks, igImpressions)); // clicks / impressions
 
     let facebook = null;
