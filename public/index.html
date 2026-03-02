@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Instagram Metrics Dashboard</title>
+  <title>Meta Metrics Dashboard</title>
 
   <style>
     body { font-family: system-ui, -apple-system, Arial; padding: 24px; background:#f5f5f5; }
@@ -32,13 +32,8 @@
 </head>
 
 <body>
-<<<<<<< Updated upstream
   <h1>Meta Metrics Dashboard</h1>
   <div class="muted">Instagram + optional Facebook via Meta Graph API. Facebook may be unavailable with user-token-only permissions.</div>
-=======
-  <h1>Instagram Metrics Dashboard</h1>
-  <div class="muted">Instagram via Meta Graph API using a user access token. Metrics are “latest daily” values when available.</div>
->>>>>>> Stashed changes
 
   <div style="margin-top:14px;">
     <button id="refreshBtn">Refresh now</button>
@@ -73,7 +68,6 @@
         <pre id="igRaw"></pre>
       </details>
     </div>
-<<<<<<< Updated upstream
 
     <div class="card">
       <h2>Facebook</h2>
@@ -105,8 +99,6 @@
       </details>
     </div>
 
-=======
->>>>>>> Stashed changes
   </div>
 
 <script>
@@ -182,6 +174,7 @@
       errorBox.style.display = "block";
       errorBox.textContent = data.action ? `${data.error} ${data.action}` : data.error;
       document.getElementById("igRaw").textContent = JSON.stringify(data, null, 2);
+      document.getElementById("fbRaw").textContent = JSON.stringify(data, null, 2);
       return;
     }
     document.getElementById("errorBox").style.display = "none";
@@ -211,7 +204,6 @@
     ].join("");
 
     document.getElementById("igRaw").textContent = JSON.stringify(ig, null, 2);
-<<<<<<< Updated upstream
 
     // Facebook (optional)
     const fb = data.facebook || {};
@@ -250,11 +242,6 @@
   document.getElementById("refreshBtn").onclick = load;
   initWeekPicker();
   document.getElementById("weekPicker").onchange = load;
-=======
-  }
-
-  document.getElementById("refreshBtn").onclick = load;
->>>>>>> Stashed changes
 
   load();
   // 1 hour = 60 minutes × 60 seconds × 1000 ms
