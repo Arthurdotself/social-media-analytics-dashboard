@@ -3,56 +3,34 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Meta Metrics Dashboard</title>
+  <title>Home Monitor</title>
 
   <style>
     body { font-family: system-ui, -apple-system, Arial; padding: 24px; background:#f5f5f5; }
-    h1 { margin: 0 0 4px; }
+    h1 { margin: 0 0 6px; }
     .muted { color: #666; font-size: 14px; }
     .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 20px; margin-top: 18px; }
     .card { background: #fff; border-radius: 16px; padding: 20px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); }
     .big { font-size: 34px; font-weight: 800; margin: 8px 0; }
-    button { padding: 10px 16px; border-radius: 10px; border: 1px solid #ddd; background: white; cursor: pointer; font-weight: 600; }
-    input, select { padding: 10px; border-radius: 10px; border: 1px solid #ddd; width: 100%; margin-bottom: 10px; background:#fff; }
-    details summary { cursor: pointer; font-size: 13px; margin-top: 10px; color:#666; }
-    pre { font-size: 12px; background: #f0f0f0; padding: 10px; border-radius: 8px; overflow-x: auto; }
-    .kpi { display:flex; justify-content:space-between; gap:12px; padding:8px 0; border-bottom:1px solid #eee; }
-    .kpi:last-child { border-bottom: none; }
-    .k { color:#333; font-size: 14px; }
-    .v { font-weight:700; }
+    button, .link-btn { padding: 10px 16px; border-radius: 10px; border: 1px solid #ddd; background: white; cursor: pointer; font-weight: 600; text-decoration:none; color:#111; display:inline-block; }
     .err { margin-top: 10px; padding: 10px 12px; border-radius: 10px; background: #fff3f3; border: 1px solid #ffcaca; color: #8b0000; font-size: 13px; }
-    .links { display:flex; flex-direction:column; gap:10px; margin-top:12px; }
-    .link-row { display:flex; justify-content:space-between; gap:12px; padding:8px 0; border-bottom:1px solid #eee; }
-    .link-row:last-child { border-bottom:none; }
-    .link-label { color:#333; font-size:14px; font-weight:700; }
-    .link-meta { color:#666; font-size:12px; margin-top:2px; }
-    .link-row a { color:#0b57d0; text-decoration:none; font-weight:600; word-break:break-all; text-align:right; }
-    .link-row a:hover { text-decoration:underline; }
   </style>
 </head>
 
 <body>
-  <h1>Meta Metrics Dashboard</h1>
-  <div class="muted">Instagram + optional Facebook via Meta Graph API. Facebook may be unavailable with user-token-only permissions.</div>
+  <h1>Home Monitor</h1>
+  <div class="muted">Quick monitoring view with follower counts only.</div>
 
   <div style="margin-top:14px;">
     <button id="refreshBtn">Refresh now</button>
-    <span class="muted" style="margin-left:10px;">Auto-refresh: 1 hour (server caches Meta calls)</span>
-  </div>
-  <div style="margin-top:10px; max-width:320px;">
-    <label for="weekPicker" class="muted">Weekly Period (Sun-Sat)</label>
-    <select id="weekPicker"></select>
-    <div class="muted">Pick the week range (example: 20-27).</div>
+    <a class="link-btn" style="margin-left:10px;" href="/comparison.html">Open Comparison Details</a>
+    <span class="muted" style="margin-left:10px;">Auto-refresh: 1 hour</span>
   </div>
 
   <div class="muted" style="margin-top:6px;">
     Last updated: <span id="lastUpdated">-</span>
     <span id="cacheTag"></span>
   </div>
-  <div class="muted" style="margin-top:6px;">
-    Period: <span id="periodLabel">-</span>
-  </div>
-  <div id="warnBox" class="muted" style="margin-top:6px;"></div>
   <div id="errorBox" class="err" style="display:none;"></div>
 
   <div class="grid">
@@ -60,192 +38,49 @@
       <h2>Instagram</h2>
       <div class="big" id="igFollowers">-</div>
       <div class="muted" id="igName"></div>
-
-      <div id="igKPIs"></div>
-
-      <details>
-        <summary>Debug</summary>
-        <pre id="igRaw"></pre>
-      </details>
     </div>
 
     <div class="card">
       <h2>Facebook</h2>
       <div class="big" id="fbFollowers">-</div>
       <div class="muted" id="fbName"></div>
-
-      <div id="fbKPIs"></div>
-
-      <details>
-        <summary>Debug</summary>
-        <pre id="fbRaw"></pre>
-      </details>
-    </div>
-
-    <div class="card">
-      <h2>Channels &amp; Profiles</h2>
-      <div class="muted">Profile + optional followers (from environment variables)</div>
-      <div class="links" id="channelsList"></div>
-    </div>
-
-    <div class="card">
-      <h2>respond.io</h2>
-      <div class="big" id="respondioMessages">0</div>
-      <div class="muted" id="respondioMeta">No webhook events yet</div>
-      <div id="respondioKPIs"></div>
-      <details>
-        <summary>Debug</summary>
-        <pre id="respondioRaw"></pre>
-      </details>
     </div>
 
   </div>
 
 <script>
   const fmt = (n) => (typeof n === "number" ? n.toLocaleString() : "N/A");
-  const fmtPct = (n) => (typeof n === "number" ? `${n.toFixed(2)}%` : "N/A");
-
-  function kpiRow(label, value) {
-    return `<div class="kpi"><div class="k">${label}</div><div class="v">${value}</div></div>`;
-  }
-
-  function channelRow(c) {
-    const handle = c.handle ? `@${c.handle}` : "N/A";
-    return `
-      <div class="link-row">
-        <div>
-          <div class="link-label">${c.platform}</div>
-          <div class="link-meta">Handle: ${handle} | Followers: ${fmt(c.followers)}</div>
-        </div>
-        <a href="${c.url}" target="_blank" rel="noopener noreferrer">${c.url}</a>
-      </div>
-    `;
-  }
-
-  function weekStartForOffset(offset) {
-    const now = new Date();
-    const utcToday = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
-    const day = utcToday.getUTCDay(); // 0=Sun
-    const start = new Date(utcToday);
-    start.setUTCDate(utcToday.getUTCDate() - day - (offset * 7));
-    return start;
-  }
-
-  function formatWeekOptionLabel(startUtc) {
-    const endUtc = new Date(startUtc);
-    endUtc.setUTCDate(endUtc.getUTCDate() + 6);
-    const startDay = startUtc.getUTCDate();
-    const endDay = endUtc.getUTCDate();
-    return `${startDay}-${endDay}`;
-  }
-
-  function initWeekPicker() {
-    const picker = document.getElementById("weekPicker");
-    const options = [];
-    for (let offset = 0; offset <= 20; offset += 1) {
-      const start = weekStartForOffset(offset);
-      const end = new Date(start);
-      end.setUTCDate(end.getUTCDate() + 6);
-      const full = `${start.toISOString().slice(0, 10)} to ${end.toISOString().slice(0, 10)}`;
-      options.push(`<option value="${offset}" title="${full}">${formatWeekOptionLabel(start)}</option>`);
-    }
-    picker.innerHTML = options.join("");
-    picker.value = "0";
-  }
 
   async function load() {
-    const weekPicker = document.getElementById("weekPicker");
-    const weekOffset = Number.parseInt(weekPicker.value || "0", 10);
-    const safeWeekOffset = Number.isFinite(weekOffset) && weekOffset >= 0 ? weekOffset : 0;
-    weekPicker.value = String(safeWeekOffset);
-
-    const [data, channelsData, respondioData] = await Promise.all([
-      fetch(`/api/meta/summary?week_offset=${encodeURIComponent(safeWeekOffset)}`).then(r => r.json()),
-      fetch("/api/marketing/channels").then(r => r.json()).catch(() => ({ channels: [] })),
-      fetch("/api/respondio/summary").then(r => r.json()).catch(() => ({})),
-    ]);
+    const data = await fetch("/api/meta/summary?week_offset=0").then(r => r.json());
 
     if (data.error) {
       document.getElementById("cacheTag").textContent = "";
       document.getElementById("lastUpdated").textContent = "Error";
-      document.getElementById("periodLabel").textContent = "-";
-      document.getElementById("warnBox").textContent = "";
       const errorBox = document.getElementById("errorBox");
       errorBox.style.display = "block";
       errorBox.textContent = data.action ? `${data.error} ${data.action}` : data.error;
-      document.getElementById("igRaw").textContent = JSON.stringify(data, null, 2);
-      document.getElementById("fbRaw").textContent = JSON.stringify(data, null, 2);
       return;
     }
     document.getElementById("errorBox").style.display = "none";
-    document.getElementById("warnBox").textContent = Array.isArray(data.warnings) && data.warnings.length
-      ? `Warnings: ${data.warnings.join(" | ")}`
-      : "";
 
     document.getElementById("lastUpdated").textContent = new Date().toLocaleTimeString();
     document.getElementById("cacheTag").textContent = data.cached ? " (cached)" : "";
-    document.getElementById("periodLabel").textContent = data.period?.label || "-";
 
-    // Instagram
     const ig = data.instagram || {};
     document.getElementById("igFollowers").textContent = fmt(ig.followers_now);
     document.getElementById("igName").textContent = ig.username ? `@${ig.username}` : "";
 
-    document.getElementById("igKPIs").innerHTML = [
-      kpiRow("Instagram – Total Reach", fmt(ig.total_reach)),
-      kpiRow("Instagram – Total Views / Impressions", fmt(ig.total_impressions)),
-      kpiRow("Instagram – Content Interactions", fmt(ig.content_interactions)),
-      kpiRow("Instagram – Engagement Rate", fmtPct(ig.engagement_rate_pct)),
-      kpiRow("Instagram – Link Clicks", fmt(ig.link_clicks)),
-      kpiRow("Instagram – Click-Through Rate (CTR)", fmtPct(ig.ctr_pct)),
-      kpiRow("Instagram – New Followers", fmt(ig.new_followers)),
-      kpiRow("Instagram – Unfollows", fmt(ig.unfollows)),
-      kpiRow("Instagram – Net Follower Growth", fmt(ig.net_follower_growth)),
-    ].join("");
-
-    document.getElementById("igRaw").textContent = JSON.stringify(ig, null, 2);
-
-    // Facebook (optional)
     const fb = data.facebook || {};
     const hasFb = data.facebook !== null;
     document.getElementById("fbFollowers").textContent = fmt(fb.followers_now);
     document.getElementById("fbName").textContent = hasFb ? (fb.page_name || "") : "Unavailable with current token/permissions";
-
-    document.getElementById("fbKPIs").innerHTML = [
-      kpiRow("Facebook – Total Reach", fmt(fb.total_reach)),
-      kpiRow("Facebook – Total Views / Impressions", fmt(fb.total_impressions)),
-      kpiRow("Facebook – Content Interactions", fmt(fb.content_interactions)),
-      kpiRow("Facebook – Engagement Rate", fmtPct(fb.engagement_rate_pct)),
-      kpiRow("Facebook – Link Clicks", fmt(fb.link_clicks)),
-      kpiRow("Facebook – Click-Through Rate (CTR)", fmtPct(fb.ctr_pct)),
-      kpiRow("Facebook – New Followers", fmt(fb.new_followers)),
-    ].join("");
-
-    document.getElementById("fbRaw").textContent = JSON.stringify(data.facebook, null, 2);
-    const channels = Array.isArray(channelsData.channels) ? channelsData.channels : [];
-    document.getElementById("channelsList").innerHTML = channels.map(channelRow).join("");
-
-    const respondMessages = typeof respondioData.messages_received === "number" ? respondioData.messages_received : 0;
-    const respondEvents = typeof respondioData.webhook_events === "number" ? respondioData.webhook_events : 0;
-    document.getElementById("respondioMessages").textContent = fmt(respondMessages);
-    document.getElementById("respondioMeta").textContent = respondioData.last_message_at
-      ? `Last message: ${new Date(respondioData.last_message_at).toLocaleString()}`
-      : "No messages received yet";
-    document.getElementById("respondioKPIs").innerHTML = [
-      kpiRow("respond.io - Messages Received", fmt(respondMessages)),
-      kpiRow("respond.io - Webhook Events", fmt(respondEvents)),
-      kpiRow("respond.io - Last Event", respondioData.last_event_at ? new Date(respondioData.last_event_at).toLocaleString() : "N/A"),
-    ].join("");
-    document.getElementById("respondioRaw").textContent = JSON.stringify(respondioData, null, 2);
   }
 
   document.getElementById("refreshBtn").onclick = load;
-  initWeekPicker();
-  document.getElementById("weekPicker").onchange = load;
 
   load();
-  // 1 hour = 60 minutes × 60 seconds × 1000 ms
-setInterval(load, 3600000);
+  setInterval(load, 3600000);
 </script>
 
 </body>
