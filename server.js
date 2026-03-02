@@ -130,6 +130,63 @@ async function fetchInsightsTotalValueBestEffort(baseUrl, metrics) {
   return out;
 }
 
+function extractLinkClicksFromPostClicksByType(value) {
+  if (!value || typeof value !== "object") return null;
+  let total = 0;
+  let found = false;
+  for (const [k, v] of Object.entries(value)) {
+    if (!Number.isFinite(v)) continue;
+    // Graph can return keys like "link clicks" (or similar variants).
+    if (k.toLowerCase().includes("link")) {
+      total += v;
+      found = true;
+    }
+  }
+  return found ? total : null;
+}
+
+async function fetchFacebookLinkClicksFromPosts(pageId, token, since, until) {
+  let nextUrl =
+    `https://graph.facebook.com/v21.0/${pageId}/posts` +
+    `?since=${since}&until=${until}&limit=100&fields=id` +
+    `&access_token=${encodeURIComponent(token)}`;
+  let totalLinkClicks = 0;
+  let processedPosts = 0;
+  let pages = 0;
+
+  while (nextUrl && pages < 10) {
+    const postsData = await getJSON(nextUrl);
+    const posts = Array.isArray(postsData?.data) ? postsData.data : [];
+    pages += 1;
+
+    for (const post of posts) {
+      const postId = post?.id;
+      if (!postId) continue;
+      processedPosts += 1;
+      try {
+        const insightsUrl =
+          `https://graph.facebook.com/v21.0/${postId}/insights` +
+          `?metric=post_clicks_by_type` +
+          `&access_token=${encodeURIComponent(token)}`;
+        const insights = await getJSON(insightsUrl);
+        const item = Array.isArray(insights?.data) ? insights.data[0] : null;
+        const values = Array.isArray(item?.values) ? item.values : [];
+        for (const entry of values) {
+          const clicks = extractLinkClicksFromPostClicksByType(entry?.value);
+          if (Number.isFinite(clicks)) totalLinkClicks += clicks;
+        }
+      } catch (e) {
+        // Skip individual post insight failures to keep aggregation resilient.
+      }
+    }
+
+    nextUrl = postsData?.paging?.next || null;
+  }
+
+  if (processedPosts === 0) return 0;
+  return totalLinkClicks;
+}
+
 async function getPageAccessTokenFromUserToken(userToken, pageId) {
   if (!userToken || !pageId) return null;
   const url =
@@ -440,7 +497,6 @@ app.get("/api/meta/summary", async (req, res) => {
           "page_impressions_unique",
           "page_views_total",
           "page_post_engagements",
-          "page_total_actions",
           "page_follows",
         ];
 
@@ -466,7 +522,7 @@ app.get("/api/meta/summary", async (req, res) => {
         const fbReach = firstAvailableMetric(fbInsights.data, ["page_impressions_unique"]);
         const fbImpressions = firstAvailableMetric(fbInsights.data, ["page_views_total"]);
         const fbInteractions = firstAvailableMetric(fbInsights.data, ["page_post_engagements"]);
-        const fbLinkClicks = firstAvailableMetric(fbInsights.data, ["page_total_actions"]);
+        const fbLinkClicks = await fetchFacebookLinkClicksFromPosts(pageId, token, since, until);
         const fbNewFollowers = metricDeltaForPeriod(fbInsights.data, "page_follows");
         const fbEngagementRate = pct(safeDiv(fbInteractions, fbReach));
         const fbCTR = pct(safeDiv(fbLinkClicks, fbImpressions));
