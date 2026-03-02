@@ -1,11 +1,17 @@
 import express from "express";
 import fetch from "node-fetch";
 import dotenv from "dotenv";
+import { promises as fs } from "fs";
+import path from "path";
 
 dotenv.config();
 
 const app = express();
 app.use(express.static("public"));
+app.use(express.json({ limit: "1mb" }));
+
+const dataDir = path.join(process.cwd(), "data");
+const respondioStatsFile = path.join(dataDir, "respondio-stats.json");
 
 async function getJSON(url) {
   const r = await fetch(url);
@@ -31,23 +37,6 @@ function mapMetaError(e) {
 
   if (metaErr.code === 190) {
     const isExpired = metaErr.error_subcode === 463;
-    const requiresPageToken =
-      typeof metaErr.message === "string" && metaErr.message.includes("Page Access Token");
-
-    if (requiresPageToken) {
-      return {
-        httpStatus: 401,
-        payload: {
-          error: metaErr.message,
-          token_expired: false,
-          token_invalid: true,
-          meta_error_code: metaErr.code,
-          meta_error_subcode: metaErr.error_subcode ?? null,
-          action:
-            "Use a Facebook Page Access Token for META_ACCESS_TOKEN (derived from a user with access to the page), then restart the server.",
-        },
-      };
-    }
 
     return {
       httpStatus: 401,
@@ -58,8 +47,8 @@ function mapMetaError(e) {
         meta_error_code: metaErr.code,
         meta_error_subcode: metaErr.error_subcode ?? null,
         action: isExpired
-          ? "Generate a new long-lived Meta token and replace META_ACCESS_TOKEN in .env, then restart the server."
-          : "Replace META_ACCESS_TOKEN with a valid token that has access to the configured page/IG account, then restart the server.",
+          ? "Generate a new long-lived user token and replace USER_ACCESS_TOKEN in .env, then restart the server."
+          : "Replace USER_ACCESS_TOKEN with a valid token that has access to the configured IG account, then restart the server.",
       },
     };
   }
@@ -72,6 +61,19 @@ function mapMetaError(e) {
       meta_error_subcode: metaErr.error_subcode ?? null,
     },
   };
+}
+
+function isPermissionError(e) {
+  return e?.responseData?.error?.code === 10;
+}
+
+function isPageTokenRequiredError(e) {
+  const err = e?.responseData?.error;
+  return (
+    err?.code === 190 &&
+    typeof err?.message === "string" &&
+    err.message.includes("Page Access Token")
+  );
 }
 
 async function fetchInsightsBestEffort(baseUrl, metrics) {
@@ -94,29 +96,70 @@ async function fetchInsightsBestEffort(baseUrl, metrics) {
   return { data: results.filter(Boolean) };
 }
 
+async function fetchInsightsTotalValueBestEffort(baseUrl, metrics) {
+  const results = await Promise.all(
+    metrics.map(async (metric) => {
+      const url = `${baseUrl}&metric=${encodeURIComponent(metric)}`;
+      try {
+        const data = await getJSON(url);
+        const item = Array.isArray(data?.data) ? data.data[0] : null;
+        const value = item?.total_value?.value;
+        if (typeof value === "number") return { name: metric, value };
+        return null;
+      } catch (e) {
+        const metaErr = e?.responseData?.error;
+        // Ignore unsupported metric errors so one bad metric does not fail all KPIs.
+        if (metaErr?.code === 100) return null;
+        throw e;
+      }
+    })
+  );
+
+  const out = {};
+  for (const r of results) {
+    if (r) out[r.name] = r.value;
+  }
+  return out;
+}
+
 function unixSeconds(d) {
   return Math.floor(d.getTime() / 1000);
 }
 
-function dayRangeUTC(daysBackStart, daysBackEnd) {
-  // returns [since, until] in unix seconds (UTC midnight boundaries)
+function weekRangeUTC(weekOffset = 0) {
+  // Returns [since, untilExclusive] for a Sunday..Saturday week in UTC.
+  // weekOffset=0 -> current week, 1 -> previous week, ...
   const now = new Date();
-  const end = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())); // today 00:00 UTC
-  const start = new Date(end);
-  start.setUTCDate(start.getUTCDate() - daysBackStart);
-  const until = new Date(end);
-  until.setUTCDate(until.getUTCDate() - daysBackEnd);
-
-  return [unixSeconds(start), unixSeconds(until)];
+  const todayUtc = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  const dayOfWeek = todayUtc.getUTCDay(); // 0=Sun ... 6=Sat
+  const sunday = new Date(todayUtc);
+  sunday.setUTCDate(todayUtc.getUTCDate() - dayOfWeek - weekOffset * 7);
+  const nextSunday = new Date(sunday);
+  nextSunday.setUTCDate(sunday.getUTCDate() + 7);
+  return [unixSeconds(sunday), unixSeconds(nextSunday), sunday, nextSunday];
 }
 
-function pickLatestValue(insightsData, metricName) {
+function metricValues(insightsData, metricName) {
   const item = (insightsData || []).find((m) => m.name === metricName);
-  if (!item || !item.values || item.values.length === 0) return null;
+  if (!item || !Array.isArray(item.values) || item.values.length === 0) return [];
+  return item.values
+    .map((v) => (typeof v?.value === "number" ? v.value : null))
+    .filter((v) => v != null);
+}
 
-  // values are usually [{ value, end_time }, ...]
-  const last = item.values[item.values.length - 1];
-  return typeof last?.value === "number" ? last.value : null;
+function sumMetricValues(insightsData, metricName) {
+  const values = metricValues(insightsData, metricName);
+  if (!values.length) return null;
+  return values.reduce((acc, n) => acc + n, 0);
+}
+
+function followerDeltaForPeriod(insightsData) {
+  const item = (insightsData || []).find((m) => m.name === "follower_count");
+  if (!item || !Array.isArray(item.values) || item.values.length < 2) return null;
+  const first = item.values[0]?.value;
+  const last = item.values[item.values.length - 1]?.value;
+  if (!Number.isFinite(first) || !Number.isFinite(last)) return null;
+  return last - first;
 }
 
 function pct(n) {
@@ -128,100 +171,222 @@ function safeDiv(a, b) {
   return a / b;
 }
 
+function parseOptionalInt(value) {
+  if (value == null || value === "") return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.trunc(n) : null;
+}
+
+async function ensureDataDir() {
+  await fs.mkdir(dataDir, { recursive: true });
+}
+
+async function readRespondioStats() {
+  try {
+    const raw = await fs.readFile(respondioStatsFile, "utf8");
+    const parsed = JSON.parse(raw);
+    return {
+      messages_received: Number.isFinite(parsed?.messages_received) ? parsed.messages_received : 0,
+      webhook_events: Number.isFinite(parsed?.webhook_events) ? parsed.webhook_events : 0,
+      last_message_at: parsed?.last_message_at ?? null,
+      last_event_at: parsed?.last_event_at ?? null,
+    };
+  } catch {
+    return {
+      messages_received: 0,
+      webhook_events: 0,
+      last_message_at: null,
+      last_event_at: null,
+    };
+  }
+}
+
+async function writeRespondioStats(stats) {
+  await ensureDataDir();
+  await fs.writeFile(respondioStatsFile, JSON.stringify(stats, null, 2));
+}
+
+function isRespondioMessageEvent(payload) {
+  if (!payload || typeof payload !== "object") return false;
+  const type = String(payload.type || payload.eventType || payload.event || "").toLowerCase();
+  if (type.includes("message")) return true;
+  if (payload.message) return true;
+  if (payload.messages && Array.isArray(payload.messages) && payload.messages.length > 0) return true;
+  return false;
+}
+
 // ---- Simple server-side cache to avoid rate limiting
 const CACHE_TTL_MS = 15000; // Meta call at most every 15s
-let cache = { ts: 0, data: null };
+let cache = { key: "", ts: 0, data: null };
+
+app.get("/api/marketing/channels", (req, res) => {
+  res.json({
+    updated_at: new Date().toISOString(),
+    channels: [
+      {
+        platform: "LinkedIn",
+        handle: "icenteriraq",
+        url: "https://www.linkedin.com/company/icenteriraq",
+        followers: parseOptionalInt(process.env.LINKEDIN_FOLLOWERS),
+      },
+      {
+        platform: "TikTok",
+        handle: "icenter.iraq",
+        url: "https://www.tiktok.com/@icenter.iraq",
+        followers: parseOptionalInt(process.env.TIKTOK_FOLLOWERS),
+      },
+      {
+        platform: "YouTube",
+        handle: "icenter-iraq",
+        url: "https://www.youtube.com/@icenter-iraq",
+        followers: parseOptionalInt(process.env.YOUTUBE_SUBSCRIBERS),
+      },
+      {
+        platform: "Instagram Channel",
+        handle: "news & updates",
+        url: "https://www.instagram.com/channel/AbZ4qYFv5-IGtzdO/",
+        followers: parseOptionalInt(process.env.INSTAGRAM_CHANNEL_MEMBERS),
+      },
+      {
+        platform: "Telegram",
+        handle: "icenterar",
+        url: "https://t.me/icenterar",
+        followers: parseOptionalInt(process.env.TELEGRAM_SUBSCRIBERS),
+      },
+      {
+        platform: "WhatsApp Channel",
+        handle: "0029Vb6KGfUI7BeNDDHOlz3Y",
+        url: "https://whatsapp.com/channel/0029Vb6KGfUI7BeNDDHOlz3Y",
+        followers: parseOptionalInt(process.env.WHATSAPP_CHANNEL_FOLLOWERS),
+      },
+    ],
+  });
+});
+
+app.get("/api/respondio/summary", async (req, res) => {
+  const stats = await readRespondioStats();
+  res.json({
+    platform: "respond.io",
+    ...stats,
+  });
+});
+
+app.post("/api/respondio/webhook", async (req, res) => {
+  try {
+    const expectedSecret = process.env.RESPONDIO_WEBHOOK_SECRET;
+    if (expectedSecret) {
+      const provided =
+        req.headers["x-respondio-secret"] ||
+        req.headers["x-webhook-secret"] ||
+        req.query.secret;
+      if (provided !== expectedSecret) {
+        return res.status(401).json({ error: "Invalid webhook secret." });
+      }
+    }
+
+    const now = new Date().toISOString();
+    const stats = await readRespondioStats();
+    stats.webhook_events += 1;
+    stats.last_event_at = now;
+
+    if (isRespondioMessageEvent(req.body)) {
+      stats.messages_received += 1;
+      stats.last_message_at = now;
+    }
+
+    await writeRespondioStats(stats);
+    res.json({ ok: true, stats });
+  } catch (e) {
+    res.status(500).json({ error: e.message || "Failed to process respond.io webhook." });
+  }
+});
 
 app.get("/api/meta/summary", async (req, res) => {
   try {
+    const weekOffsetRaw = Number.parseInt(String(req.query.week_offset ?? "0"), 10);
+    const weekOffset = Number.isFinite(weekOffsetRaw) && weekOffsetRaw >= 0 ? weekOffsetRaw : 0;
+    const cacheKey = `summary:week_offset=${weekOffset}`;
     const now = Date.now();
-    if (cache.data && now - cache.ts < CACHE_TTL_MS) {
+    if (cache.data && cache.key === cacheKey && now - cache.ts < CACHE_TTL_MS) {
       return res.json({ ...cache.data, cached: true });
     }
 
-    const token = process.env.META_ACCESS_TOKEN;
+    const igToken = process.env.USER_ACCESS_TOKEN || process.env.META_ACCESS_TOKEN;
+    const fbToken = process.env.FB_ACCESS_TOKEN || process.env.META_ACCESS_TOKEN || process.env.USER_ACCESS_TOKEN;
     const igUserId = process.env.IG_USER_ID;
     const pageId = process.env.FB_PAGE_ID;
 
-    if (!token || !igUserId || !pageId) {
+    if (!igToken || !igUserId) {
       return res.status(400).json({
-        error: "Missing META_ACCESS_TOKEN, IG_USER_ID, or FB_PAGE_ID in .env",
+        error: "Missing USER_ACCESS_TOKEN (or META_ACCESS_TOKEN) or IG_USER_ID in .env",
       });
     }
 
-    // We’ll fetch “yesterday” and “day before yesterday” to compute deltas.
-    // since = 2 days ago 00:00 UTC, until = today 00:00 UTC
-    const [since, until] = dayRangeUTC(2, 0);
+    const [since, until, weekStart, weekEndExclusive] = weekRangeUTC(weekOffset);
+    const weekEndInclusive = new Date(weekEndExclusive);
+    weekEndInclusive.setUTCDate(weekEndInclusive.getUTCDate() - 1);
 
     // ---- Instagram account basic
     const igBasicUrl =
       `https://graph.facebook.com/v21.0/${igUserId}` +
       `?fields=username,followers_count,media_count` +
-      `&access_token=${encodeURIComponent(token)}`;
+      `&access_token=${encodeURIComponent(igToken)}`;
 
-    // ---- Instagram insights (daily)
-    // Metrics we’ll try:
-    // reach, impressions, accounts_engaged, website_clicks, profile_views, follower_count
+    // ---- Instagram insights (daily values)
+    // follower_count is kept here for net-growth calculation in the selected week.
     const igInsightsMetrics = [
       "reach",
-      "impressions",
+      "follower_count",
+    ];
+    const igTotalValueMetrics = [
+      "views",
       "accounts_engaged",
       "website_clicks",
       "profile_views",
-      "follower_count",
+      "profile_links_taps",
     ];
 
     const igInsightsBaseUrl =
       `https://graph.facebook.com/v21.0/${igUserId}/insights` +
       `?period=day&since=${since}&until=${until}` +
-      `&access_token=${encodeURIComponent(token)}`;
+      `&access_token=${encodeURIComponent(igToken)}`;
+    const igTotalValueBaseUrl =
+      `https://graph.facebook.com/v21.0/${igUserId}/insights` +
+      `?period=day&metric_type=total_value&since=${since}&until=${until}` +
+      `&access_token=${encodeURIComponent(igToken)}`;
 
-    // ---- Facebook Page basic
-    const fbBasicUrl =
-      `https://graph.facebook.com/v21.0/${pageId}` +
-      `?fields=name,fan_count` +
-      `&access_token=${encodeURIComponent(token)}`;
+    const warnings = [];
 
-    // ---- Facebook Page insights (daily)
-    // Reach-ish: page_impressions_unique
-    // Impressions: page_impressions
-    // Interactions: page_engaged_users
-    // Link clicks (best-effort): page_consumptions (this is “clicks on any content”)
-    // Some pages have different availability depending on permissions/rollouts.
-    const fbInsightsMetrics = [
-      "page_impressions_unique",
-      "page_impressions",
-      "page_engaged_users",
-      "page_consumptions",
-    ];
+    let igBasic = {};
+    try {
+      igBasic = await getJSON(igBasicUrl);
+    } catch (e) {
+      if (!isPermissionError(e)) throw e;
+      warnings.push("Missing permission for Instagram basic fields (username/followers/media_count).");
+    }
 
-    const fbInsightsBaseUrl =
-      `https://graph.facebook.com/v21.0/${pageId}/insights` +
-      `?period=day&since=${since}&until=${until}` +
-      `&access_token=${encodeURIComponent(token)}`;
+    let igInsights = { data: [] };
+    try {
+      igInsights = await fetchInsightsBestEffort(igInsightsBaseUrl, igInsightsMetrics);
+    } catch (e) {
+      if (!isPermissionError(e)) throw e;
+      warnings.push("Missing permission for Instagram insights. Returning basic profile only.");
+    }
 
-    const [igBasic, igInsights, fbBasic, fbInsights] = await Promise.all([
-      getJSON(igBasicUrl),
-      fetchInsightsBestEffort(igInsightsBaseUrl, igInsightsMetrics),
-      getJSON(fbBasicUrl),
-      fetchInsightsBestEffort(fbInsightsBaseUrl, fbInsightsMetrics),
-    ]);
+    let igTotalValueInsights = {};
+    try {
+      igTotalValueInsights = await fetchInsightsTotalValueBestEffort(igTotalValueBaseUrl, igTotalValueMetrics);
+    } catch (e) {
+      if (!isPermissionError(e)) throw e;
+      warnings.push("Missing permission for Instagram total-value insights.");
+    }
 
-    // ---- Instagram metrics
-    const igReach = pickLatestValue(igInsights.data, "reach");
-    const igImpressions = pickLatestValue(igInsights.data, "impressions");
-    const igInteractions = pickLatestValue(igInsights.data, "accounts_engaged"); // “content interactions” proxy
-    const igLinkClicks = pickLatestValue(igInsights.data, "website_clicks");
-    const igFollowerCountDaily = igInsights.data?.find((m) => m.name === "follower_count")?.values || [];
-
-    const igYesterdayFollowers =
-      igFollowerCountDaily.length >= 2 ? igFollowerCountDaily[igFollowerCountDaily.length - 2]?.value : null;
-    const igTodayFollowers =
-      igFollowerCountDaily.length >= 1 ? igFollowerCountDaily[igFollowerCountDaily.length - 1]?.value : null;
-
-    const igDelta = (Number.isFinite(igTodayFollowers) && Number.isFinite(igYesterdayFollowers))
-      ? igTodayFollowers - igYesterdayFollowers
-      : null;
+    // ---- Instagram metrics (weekly sums / deltas for the selected Sunday..Saturday period)
+    const igReach = sumMetricValues(igInsights.data, "reach");
+    const igImpressions = igTotalValueInsights.views ?? null;
+    const igInteractions = igTotalValueInsights.accounts_engaged ?? null;
+    const igLinkClicks = igTotalValueInsights.website_clicks ?? igTotalValueInsights.profile_links_taps ?? null;
+    const igDelta = followerDeltaForPeriod(igInsights.data);
 
     const igNewFollowers = igDelta != null ? Math.max(0, igDelta) : null;
     const igUnfollows = igDelta != null ? Math.max(0, -igDelta) : null;
@@ -230,22 +395,81 @@ app.get("/api/meta/summary", async (req, res) => {
     const igEngagementRate = pct(safeDiv(igInteractions, igImpressions)); // interactions / impressions
     const igCTR = pct(safeDiv(igLinkClicks, igImpressions)); // clicks / impressions
 
-    // ---- Facebook metrics
-    const fbReach = pickLatestValue(fbInsights.data, "page_impressions_unique");
-    const fbImpressions = pickLatestValue(fbInsights.data, "page_impressions");
-    const fbInteractions = pickLatestValue(fbInsights.data, "page_engaged_users");
-    const fbLinkClicks = pickLatestValue(fbInsights.data, "page_consumptions"); // best-effort “clicks”
-    const fbEngagementRate = pct(safeDiv(fbInteractions, fbImpressions));
-    const fbCTR = pct(safeDiv(fbLinkClicks, fbImpressions));
+    let facebook = null;
+    if (!pageId) {
+      warnings.push("FB_PAGE_ID is not set. Skipping Facebook metrics.");
+    } else if (!fbToken) {
+      warnings.push("No Facebook token found. Set FB_ACCESS_TOKEN or META_ACCESS_TOKEN for Facebook metrics.");
+    } else {
+      const fbBasicUrl =
+        `https://graph.facebook.com/v21.0/${pageId}` +
+        `?fields=name,fan_count` +
+        `&access_token=${encodeURIComponent(fbToken)}`;
 
-    // “New Followers” for Facebook: use fan_count delta from insights if available is messy,
-    // so we do the same “delta from yesterday” approach by querying fan_count now vs storing history.
-    // For now we return only current fan_count and leave “new followers” null unless you want persistence.
-    const fbNewFollowers = null;
+      const fbInsightsMetrics = [
+        "page_impressions_unique",
+        "page_impressions",
+        "page_engaged_users",
+        "page_consumptions",
+      ];
+
+      const fbInsightsBaseUrl =
+        `https://graph.facebook.com/v21.0/${pageId}/insights` +
+        `?period=day&since=${since}&until=${until}` +
+        `&access_token=${encodeURIComponent(fbToken)}`;
+
+      try {
+        const fbBasic = await getJSON(fbBasicUrl);
+        facebook = {
+          page_name: fbBasic.name ?? null,
+          followers_now: fbBasic.fan_count ?? null,
+          total_reach: null,
+          total_impressions: null,
+          content_interactions: null,
+          engagement_rate_pct: null,
+          link_clicks: null,
+          ctr_pct: null,
+          new_followers: null,
+        };
+
+        const fbInsights = await fetchInsightsBestEffort(fbInsightsBaseUrl, fbInsightsMetrics);
+
+        const fbReach = sumMetricValues(fbInsights.data, "page_impressions_unique");
+        const fbImpressions = sumMetricValues(fbInsights.data, "page_impressions");
+        const fbInteractions = sumMetricValues(fbInsights.data, "page_engaged_users");
+        const fbLinkClicks = sumMetricValues(fbInsights.data, "page_consumptions");
+        const fbEngagementRate = pct(safeDiv(fbInteractions, fbImpressions));
+        const fbCTR = pct(safeDiv(fbLinkClicks, fbImpressions));
+
+        facebook.total_reach = fbReach;
+        facebook.total_impressions = fbImpressions;
+        facebook.content_interactions = fbInteractions;
+        facebook.engagement_rate_pct = fbEngagementRate;
+        facebook.link_clicks = fbLinkClicks;
+        facebook.ctr_pct = fbCTR;
+      } catch (e) {
+        if (isPermissionError(e) || isPageTokenRequiredError(e)) {
+          if (facebook) {
+            warnings.push("Facebook insights unavailable with current token/permissions. Showing basic page metrics only.");
+          } else {
+            warnings.push("Facebook metrics unavailable with current token/permissions.");
+          }
+        } else {
+          throw e;
+        }
+      }
+    }
 
     const payload = {
       cached: false,
       updated_at: new Date().toISOString(),
+      period: {
+        type: "weekly",
+        week_offset: weekOffset,
+        start_utc: weekStart.toISOString(),
+        end_utc_inclusive: weekEndInclusive.toISOString(),
+        label: `${weekStart.toISOString().slice(0, 10)} to ${weekEndInclusive.toISOString().slice(0, 10)} (Sun-Sat, UTC)`,
+      },
 
       instagram: {
         username: igBasic.username ?? null,
@@ -263,23 +487,11 @@ app.get("/api/meta/summary", async (req, res) => {
         unfollows: igUnfollows,
         net_follower_growth: igNetGrowth,
       },
-
-      facebook: {
-        page_name: fbBasic.name ?? null,
-        followers_now: fbBasic.fan_count ?? null,
-
-        total_reach: fbReach,
-        total_impressions: fbImpressions,
-        content_interactions: fbInteractions,
-        engagement_rate_pct: fbEngagementRate, // %
-        link_clicks: fbLinkClicks,
-        ctr_pct: fbCTR, // %
-
-        new_followers: fbNewFollowers, // null unless you want persistence
-      },
+      facebook,
+      warnings,
     };
 
-    cache = { ts: now, data: payload };
+    cache = { key: cacheKey, ts: now, data: payload };
     res.json(payload);
   } catch (e) {
     const mapped = mapMetaError(e);
@@ -293,30 +505,31 @@ app.get("/api/meta/instagram", async (req, res) => {
   res.status(410).json({ error: "Use /api/meta/summary instead." });
 });
 app.get("/api/meta/facebook-page", async (req, res) => {
-  res.status(410).json({ error: "Use /api/meta/summary instead." });
-});
-
-app.get("/api/meta/video-insights", async (req, res) => {
   try {
-    const videoId = req.query.video_id;
-    const token = process.env.META_ACCESS_TOKEN;
-    if (!videoId) return res.status(400).json({ error: "Provide ?video_id=..." });
-    if (!token) return res.status(400).json({ error: "Missing META_ACCESS_TOKEN" });
-
-    const metrics = (req.query.metrics || "total_video_impressions,total_video_views").split(",");
+    const pageId = process.env.FB_PAGE_ID;
+    const token = process.env.FB_ACCESS_TOKEN || process.env.META_ACCESS_TOKEN || process.env.USER_ACCESS_TOKEN;
+    if (!pageId || !token) return res.status(400).json({ error: "Missing FB_PAGE_ID or FB_ACCESS_TOKEN (or META_ACCESS_TOKEN)" });
 
     const url =
-      `https://graph.facebook.com/v21.0/${videoId}/video_insights` +
-      `?metric=${encodeURIComponent(metrics.join(","))}` +
+      `https://graph.facebook.com/v21.0/${pageId}` +
+      `?fields=name,fan_count` +
       `&access_token=${encodeURIComponent(token)}`;
-
     const data = await getJSON(url);
-    res.json({ platform: "meta", video_id: videoId, insights: data.data ?? data });
+
+    res.json({
+      platform: "facebook",
+      page: data.name ?? null,
+      followers: data.fan_count ?? null,
+    });
   } catch (e) {
     const mapped = mapMetaError(e);
     if (mapped) return res.status(mapped.httpStatus).json(mapped.payload);
     res.status(500).json({ error: e.message });
   }
+});
+
+app.get("/api/meta/video-insights", async (req, res) => {
+  res.status(410).json({ error: "Video insights endpoint removed. It requires page-level access." });
 });
 
 app.listen(3000, () => console.log("Dashboard running on http://localhost:3000"));
