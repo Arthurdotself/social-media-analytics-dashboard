@@ -44,6 +44,13 @@
       white-space: nowrap;
       box-shadow: 0 2px 8px rgba(0,0,0,0.3);
     }
+    .ai-summary {
+      margin-top: 8px;
+      white-space: pre-line;
+      line-height: 1.6;
+      color: #1f2937;
+      font-size: 14px;
+    }
   </style>
 </head>
 <body>
@@ -94,6 +101,12 @@
       <h2>Week-Over-Week Comparison</h2>
       <div class="muted" id="comparePeriods">-</div>
       <div id="compareTable"></div>
+    </div>
+
+    <div class="card">
+      <h2>AI Insights</h2>
+      <div class="muted" id="aiMeta">Compares the two selected weeks.</div>
+      <div id="aiSummary" class="ai-summary">Loading AI summary...</div>
     </div>
 
     <div class="card chart-card">
@@ -270,12 +283,16 @@
   async function load() {
     const weekPickerA = document.getElementById("weekPickerA");
     const weekPickerB = document.getElementById("weekPickerB");
+    const aiSummaryEl = document.getElementById("aiSummary");
+    const aiMetaEl = document.getElementById("aiMeta");
     const weekOffsetA = Number.parseInt(weekPickerA.value || "0", 10);
     const weekOffsetB = Number.parseInt(weekPickerB.value || "1", 10);
     const safeWeekOffsetA = Number.isFinite(weekOffsetA) && weekOffsetA >= 0 ? weekOffsetA : 0;
     const safeWeekOffsetB = Number.isFinite(weekOffsetB) && weekOffsetB >= 0 ? weekOffsetB : 1;
     weekPickerA.value = String(safeWeekOffsetA);
     weekPickerB.value = String(safeWeekOffsetB);
+    aiMetaEl.textContent = "Compares the two selected weeks.";
+    aiSummaryEl.textContent = "Loading AI summary...";
 
     const [data, previousData] = await Promise.all([
       fetch(`/api/meta/summary?week_offset=${encodeURIComponent(safeWeekOffsetA)}`).then(r => r.json()),
@@ -299,6 +316,8 @@
       document.getElementById("compareTable").innerHTML = "";
       document.getElementById("compareChartInstagram").innerHTML = "";
       document.getElementById("compareChartFacebook").innerHTML = "";
+      aiMetaEl.textContent = "Unavailable";
+      aiSummaryEl.textContent = "AI summary is unavailable because weekly analytics could not be loaded.";
       return;
     }
 
@@ -393,6 +412,28 @@
 
     buildBarChart("compareChartInstagram", ig, prevIg, compactPeriodLabel(currentPeriod), compactPeriodLabel(prevPeriod));
     buildBarChart("compareChartFacebook", fb, prevFb, compactPeriodLabel(currentPeriod), compactPeriodLabel(prevPeriod));
+
+    const aiData = await fetch("/api/ai/summary", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        current_summary: data,
+        previous_summary: previousData,
+        respond_current: respondA,
+        respond_previous: respondB,
+      }),
+    }).then(r => r.json()).catch(() => ({ error: "AI summary request failed" }));
+
+    if (aiData?.error) {
+      aiMetaEl.textContent = "Unavailable";
+      aiSummaryEl.textContent = aiData.error;
+    } else {
+      const providerLabel = aiData.provider ? ` via ${aiData.provider}` : "";
+      aiMetaEl.textContent = `${compactPeriodLabel(currentPeriod)} vs ${compactPeriodLabel(prevPeriod)}${providerLabel}${aiData.cached ? " (cached)" : ""}`;
+      aiSummaryEl.textContent = aiData.summary || "No AI summary returned.";
+    }
   }
 
   document.getElementById("refreshBtn").onclick = load;
