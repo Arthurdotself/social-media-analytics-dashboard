@@ -31,6 +31,31 @@ async function getJSON(url) {
   return data;
 }
 
+async function postJSON(url, body, headers = {}) {
+  const r = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...headers,
+    },
+    body: JSON.stringify(body),
+  });
+  const text = await r.text();
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    data = { raw: text };
+  }
+  if (!r.ok) {
+    const err = new Error(`HTTP ${r.status}: ${JSON.stringify(data)}`);
+    err.httpStatus = r.status;
+    err.responseData = data;
+    throw err;
+  }
+  return data;
+}
+
 function mapMetaError(e) {
   const metaErr = e?.responseData?.error;
   if (!metaErr) return null;
@@ -262,6 +287,16 @@ function parseOptionalInt(value) {
   return Number.isFinite(n) ? Math.trunc(n) : null;
 }
 
+function formatRespondDateUTC(date) {
+  const y = date.getUTCFullYear();
+  const m = String(date.getUTCMonth() + 1).padStart(2, "0");
+  const d = String(date.getUTCDate()).padStart(2, "0");
+  const hh = String(date.getUTCHours()).padStart(2, "0");
+  const mm = String(date.getUTCMinutes()).padStart(2, "0");
+  const ss = String(date.getUTCSeconds()).padStart(2, "0");
+  return `${y}-${m}-${d} ${hh}:${mm}:${ss}`;
+}
+
 async function ensureDataDir() {
   await fs.mkdir(dataDir, { recursive: true });
 }
@@ -303,6 +338,9 @@ function isRespondioMessageEvent(payload) {
 // ---- Simple server-side cache to avoid rate limiting
 const CACHE_TTL_MS = 15000; // Meta call at most every 15s
 let cache = { key: "", ts: 0, data: null };
+const RESPOND_CACHE_TTL_MS = 60000;
+let respondCache = { key: "", ts: 0, data: null };
+const RESPOND_CONTACTS_PAGE_LIMIT = 50;
 
 app.get("/api/marketing/channels", (req, res) => {
   res.json({
@@ -354,6 +392,77 @@ app.get("/api/respondio/summary", async (req, res) => {
     platform: "respond.io",
     ...stats,
   });
+});
+
+app.get("/api/respondio/weekly-contacts", async (req, res) => {
+  try {
+    const token = process.env.RESPOND_ACCESS_TOKEN;
+    if (!token) return res.status(400).json({ error: "Missing RESPOND_ACCESS_TOKEN in .env" });
+
+    const weekOffsetRaw = Number.parseInt(String(req.query.week_offset ?? "0"), 10);
+    const weekOffset = Number.isFinite(weekOffsetRaw) && weekOffsetRaw >= 0 ? weekOffsetRaw : 0;
+    const cacheKey = `respond:weekly-contacts:${weekOffset}`;
+    const now = Date.now();
+    if (respondCache.data && respondCache.key === cacheKey && now - respondCache.ts < RESPOND_CACHE_TTL_MS) {
+      return res.json({ ...respondCache.data, cached: true });
+    }
+
+    const [since, until, weekStart, weekEndExclusive] = weekRangeUTC(weekOffset);
+    const weekEndInclusive = new Date(weekEndExclusive);
+    weekEndInclusive.setUTCDate(weekEndInclusive.getUTCDate() - 1);
+
+    let nextUrl = `https://api.respond.io/v2/contact/list?limit=${RESPOND_CONTACTS_PAGE_LIMIT}`;
+    let pages = 0;
+    const maxPages = 200;
+    const uniqueContactIds = new Set();
+
+    const requestBody = {
+      search: "",
+      timezone: "UTC",
+      filter: { $and: [] },
+    };
+
+    while (nextUrl && pages < maxPages) {
+      const data = await postJSON(nextUrl, requestBody, {
+        Authorization: `Bearer ${token}`,
+      });
+      pages += 1;
+
+      const items = Array.isArray(data?.items) ? data.items : [];
+      let pageHasPotentialNewerItems = false;
+      for (const item of items) {
+        const id = item?.id;
+        const createdAt = item?.created_at;
+        if (!Number.isFinite(createdAt) || id == null) continue;
+        if (createdAt >= since) pageHasPotentialNewerItems = true;
+        if (createdAt >= since && createdAt < until) uniqueContactIds.add(String(id));
+      }
+
+      // Contacts are returned newest first; when a page has no entries >= since, we're past the target week.
+      if (!pageHasPotentialNewerItems) break;
+
+      nextUrl = data?.pagination?.next || null;
+    }
+
+    const payload = {
+      cached: false,
+      period: {
+        type: "weekly",
+        week_offset: weekOffset,
+        start_utc: weekStart.toISOString(),
+        end_utc_inclusive: weekEndInclusive.toISOString(),
+        label: `${weekStart.toISOString().slice(0, 10)} to ${weekEndInclusive.toISOString().slice(0, 10)} (Sun-Sat, UTC)`,
+      },
+      people_contacted: uniqueContactIds.size,
+      source: "respond.io contacts created_at",
+      pages_scanned: pages,
+    };
+
+    respondCache = { key: cacheKey, ts: now, data: payload };
+    res.json(payload);
+  } catch (e) {
+    res.status(500).json({ error: e.message || "Failed to fetch respond.io weekly contacts" });
+  }
 });
 
 app.post("/api/respondio/webhook", async (req, res) => {
